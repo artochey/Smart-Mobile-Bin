@@ -14,29 +14,27 @@ char pass[] = "12347777";
 #include "DHT.h"
 
 // --- ขาอุปกรณ์ ---
-const int trig1 = 5;  const int echo1 = 18; // อัลตราโซนิกหน้ารถ
-const int trig2 = 16; const int echo2 = 17; // อัลตราโซนิกในถัง
+const int trig1 = 5;  const int echo1 = 18; 
+const int trig2 = 16; const int echo2 = 17; 
 const int servoPin = 13;
 const int buzzer = 4;
 const int ledRed = 15;
 const int ledGreen = 2;
 
 // --- ขา L298N ---
-const int IN1 = 27; // ล้อซ้าย เดินหน้า
-const int IN2 = 26; // ล้อซ้าย ถอยหลัง
-const int IN3 = 25; // ล้อขวา เดินหน้า
-const int IN4 = 33; // ล้อขวา ถอยหลัง
+const int IN1 = 27; 
+const int IN2 = 26; 
+const int IN3 = 25; 
+const int IN4 = 33; 
 
-// --- ขา DHT11 ---
-#define DHTPIN 21       // ต่อสาย DATA ของ DHT11 เข้าขา D21
-#define DHTTYPE DHT11   // เลือกชนิดเซนเซอร์
+#define DHTPIN 21       
+#define DHTTYPE DHT11   
 DHT dht(DHTPIN, DHTTYPE);
 
 Servo myServo;
 BlynkTimer timer;
 
 // --- ตัวแปร State Machine ---
-// ตัดโหมดที่ไม่ใช้ออก เหลือแค่ STANDBY, CONTROL, SERVICE(เปิดฝา), FULL_BIN
 enum State { STANDBY, CONTROL, SERVICE, FULL_BIN };
 State currentState = STANDBY;
 State previousState = STANDBY;
@@ -44,7 +42,12 @@ State previousState = STANDBY;
 unsigned long lastPrintTime = 0;
 unsigned long serviceTimer = 0; 
 unsigned long ignoreSensorUntil = 0;
+unsigned long ignoreInsideSensorUntil = 0; 
 bool isLidOpen = false;        
+bool autoSensorEnabled = true;
+
+// 🌟 ตัวแปรใหม่สำหรับปุ่ม V9 (ขับตอนฝาเปิด)
+bool canDriveWhenOpen = false; 
 
 // --- ฟังก์ชันพื้นฐาน ---
 long getDist(int trig, int echo) {
@@ -62,7 +65,6 @@ void beep(int times, int duration) {
   }
 }
 
-// ฟังก์ชันปริ้นล็อก ส่งเข้าทั้ง Serial และแอป Blynk (V5)
 void printLog(String msg) {
   Serial.print(msg);
   Blynk.virtualWrite(V5, msg + "\n"); 
@@ -74,7 +76,6 @@ void motorBackward() { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); digital
 void motorLeft()     { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  }
 void motorRight()    { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); }
 
-// --- ฟังก์ชันส่งค่า DHT11 เข้า Blynk ---
 void sendSensorData() {
   float h = dht.readHumidity();
   float t = dht.readTemperature();
@@ -83,33 +84,60 @@ void sendSensorData() {
     Serial.println("Failed to read from DHT sensor!");
     return;
   }
-  Blynk.virtualWrite(V0, t); // ส่งอุณหภูมิไป V0
-  Blynk.virtualWrite(V1, h); // ส่งความชื้นไป V1
+  Blynk.virtualWrite(V0, t); 
+  Blynk.virtualWrite(V1, h); 
 }
 
 // ==========================================
 // --- รับคำสั่งจาก Blynk App ---
 // ==========================================
 
-// สวิตช์เลือกโหมด (V2)
+// V2: สวิตช์เลือกโหมด Standby / Control
 BLYNK_WRITE(V2) { 
   if(param.asInt() == 1) {
-    currentState = CONTROL; // เปลี่ยนเป็นโหมดบังคับมือ
+    currentState = CONTROL; 
     printLog(">> MODE: MANUAL CONTROL <<");
     motorStop();
-    if(isLidOpen) { myServo.write(0); isLidOpen = false; } // ปิดฝาก่อนวิ่ง
+    if(isLidOpen) { 
+      myServo.write(0); 
+      isLidOpen = false; 
+      ignoreInsideSensorUntil = millis() + 2000; 
+    } 
   } else {
-    currentState = STANDBY; // กลับโหมดรอรับขยะ
+    currentState = STANDBY; 
     printLog(">> MODE: STANDBY <<");
     motorStop();
   }
 }
 
-// ปุ่มควบคุมรถ (ทำงานเฉพาะตอนอยู่โหมด CONTROL เท่านั้น)
-BLYNK_WRITE(V3) { if(currentState == CONTROL) { if(param.asInt() == 1) motorForward();  else motorStop(); } } // หน้า
-BLYNK_WRITE(V4) { if(currentState == CONTROL) { if(param.asInt() == 1) motorBackward(); else motorStop(); } } // หลัง
-BLYNK_WRITE(V6) { if(currentState == CONTROL) { if(param.asInt() == 1) motorLeft();     else motorStop(); } } // ซ้าย
-BLYNK_WRITE(V7) { if(currentState == CONTROL) { if(param.asInt() == 1) motorRight();    else motorStop(); } } // ขวา
+// V8: สวิตช์ ปิด/เปิด เซนเซอร์หน้ารถ
+BLYNK_WRITE(V8) { 
+  if(param.asInt() == 1) {
+    autoSensorEnabled = true;
+    printLog(">> FRONT SENSOR: ON <<");
+  } else {
+    autoSensorEnabled = false; 
+    printLog(">> FRONT SENSOR: OFF (BYPASS) <<");
+  }
+}
+
+// 🌟 V9: สวิตช์เปิดโหมด "ขับรถตอนฝาอ้า"
+BLYNK_WRITE(V9) { 
+  if(param.asInt() == 1) {
+    canDriveWhenOpen = true;
+    printLog(">> DRIVE WHEN OPEN: ENABLED <<");
+  } else {
+    canDriveWhenOpen = false; 
+    printLog(">> DRIVE WHEN OPEN: DISABLED <<");
+    if(currentState == SERVICE) motorStop(); // ถ้าปิดปุ่มนี้ตอนฝากำลังอ้า ให้เบรกทันที
+  }
+}
+
+// 🌟 อัปเดตปุ่มควบคุม (V3-V7) ให้เช็กตัวแปร canDriveWhenOpen
+BLYNK_WRITE(V3) { if(currentState == CONTROL || (currentState == SERVICE && previousState == CONTROL && canDriveWhenOpen)) { if(param.asInt() == 1) motorForward();  else motorStop(); } }
+BLYNK_WRITE(V4) { if(currentState == CONTROL || (currentState == SERVICE && previousState == CONTROL && canDriveWhenOpen)) { if(param.asInt() == 1) motorBackward(); else motorStop(); } }
+BLYNK_WRITE(V6) { if(currentState == CONTROL || (currentState == SERVICE && previousState == CONTROL && canDriveWhenOpen)) { if(param.asInt() == 1) motorLeft();     else motorStop(); } }
+BLYNK_WRITE(V7) { if(currentState == CONTROL || (currentState == SERVICE && previousState == CONTROL && canDriveWhenOpen)) { if(param.asInt() == 1) motorRight();    else motorStop(); } }
 
 
 void setup() {
@@ -129,13 +157,14 @@ void setup() {
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   dht.begin();
   
-  // ให้ฟังก์ชัน sendSensorData ทำงานทุกๆ 2 วินาที
   timer.setInterval(2000L, sendSensorData);
 
-  // สั่งให้ Blynk รีเซ็ตสวิตช์โหมดเป็น Standby ตอนเปิดเครื่อง
-  Blynk.virtualWrite(V2, 0); 
+  // ตั้งค่าปุ่มในแอปตอนเปิดเครื่อง
+  Blynk.virtualWrite(V2, 0); // อยู่ในโหมด Standby
+  Blynk.virtualWrite(V8, 1); // เปิดเซนเซอร์หน้ารถปกติ
+  Blynk.virtualWrite(V9, 0); // 🌟 ปิดโหมดขับตอนฝาอ้าไว้ก่อน (เซฟตี้)
 
-  Serial.println("\n--- AI System Ready (Standby & Control Mode) ---");
+  Serial.println("\n--- AI System Ready ---");
 }
 
 void loop() {
@@ -143,16 +172,19 @@ void loop() {
   timer.run(); 
 
   long distFront = getDist(trig1, echo1);
-  long distInside = getDist(trig2, echo2);
+  long distInside = 999; 
   unsigned long currentMillis = millis();
 
-  // เมินค่าเซนเซอร์อัลตราโซนิกตอนเพิ่งปิดฝา
   if (currentMillis < ignoreSensorUntil) {
     distFront = 999; 
   }
 
-  // --- 1. เช็กขยะเต็ม (เช็กตลอดเวลาไม่ว่าจะอยู่โหมดไหน) ---
-  if (distInside < 1 && currentState != FULL_BIN && currentState != SERVICE) {
+  if (!isLidOpen && currentMillis >= ignoreInsideSensorUntil) {
+    distInside = getDist(trig2, echo2);
+  }
+
+  // --- 1. เช็กขยะเต็ม ---
+  if (distInside != 999 && distInside > 2 && distInside < 5 && currentState != FULL_BIN && currentState != SERVICE) {
     printLog(">> WARNING: BIN IS FULL! <<");
     currentState = FULL_BIN;
     isLidOpen = false; 
@@ -164,8 +196,7 @@ void loop() {
     
     case STANDBY:
       digitalWrite(ledGreen, HIGH); digitalWrite(ledRed, LOW);
-      // ในโหมดนี้ รถจะไม่วิ่ง แต่จะรอเปิดฝาถ้ามีคนมาใกล้
-      if (distFront < 15) {
+      if (distFront < 35 && autoSensorEnabled) {
         printLog(">> TARGET LOCKED: OPENING BIN <<");
         beep(1, 100); 
         previousState = STANDBY; 
@@ -175,32 +206,49 @@ void loop() {
       break;
 
     case CONTROL:
-      // โหมดบังคับมือ (ไฟกะพริบสลับสีให้รู้ว่าพร้อมซิ่ง)
       digitalWrite(ledGreen, (currentMillis/500)%2); 
       digitalWrite(ledRed, !((currentMillis/500)%2));
-      // **การขยับรถ ถูกสั่งงานผ่าน BLYNK_WRITE(V3-V7) ด้านบนแล้ว**
+      
+      if (distFront < 35 && autoSensorEnabled) {
+        motorStop(); // เบรกก่อนเปิดฝา
+        printLog(">> TARGET LOCKED: OPENING BIN <<");
+        beep(1, 100); 
+        previousState = CONTROL; 
+        isLidOpen = false;
+        currentState = SERVICE;
+      }
       break;
 
     case SERVICE:
-      // โหมดเปิดฝาทิ้งไว้
       digitalWrite(ledRed, HIGH); digitalWrite(ledGreen, LOW);
-      motorStop(); 
+      
+      // 🌟 ถ้าไม่ได้เปิดปุ่ม V9 ไว้ ให้บังคับเบรกรถเพื่อความปลอดภัย!
+      if (!canDriveWhenOpen) {
+        motorStop(); 
+      }
+
       if (!isLidOpen) {
         myServo.write(150); isLidOpen = true;
         serviceTimer = currentMillis; ignoreSensorUntil = currentMillis + 1000; 
       }
-      if (currentMillis > ignoreSensorUntil && distFront < 30) serviceTimer = currentMillis; 
+      if (currentMillis > ignoreSensorUntil && distFront < 35) serviceTimer = currentMillis; 
 
       if (currentMillis - serviceTimer > 3000) {
-        beep(1, 100); myServo.write(0); isLidOpen = false;
+        beep(1, 100); 
+        myServo.write(0); 
+        isLidOpen = false;
         ignoreSensorUntil = currentMillis + 3000; 
-        printLog(">> DONE: BACK TO STANDBY <<");
-        currentState = previousState; // กลับไปโหมดก่อนหน้า
+        ignoreInsideSensorUntil = currentMillis + 2000; 
+        
+        String modeName = (previousState == CONTROL) ? "MANUAL CONTROL" : "STANDBY";
+        printLog(">> DONE: BACK TO " + modeName + " <<");
+        
+        currentState = previousState; 
       }
       break;
 
     case FULL_BIN: {
-      motorStop(); 
+      motorStop(); // ขยะเต็มต้องบังคับเบรกเสมอ!
       digitalWrite(ledRed, (currentMillis/500)%2); digitalWrite(ledGreen, LOW);
       if (!isLidOpen) {
         myServo.write(150); isLidOpen = true; serviceTimer = currentMillis; 
@@ -214,25 +262,30 @@ void loop() {
       if (distFront < 30) serviceTimer = currentMillis;
 
       if (currentMillis - serviceTimer > 15000) {
-        digitalWrite(buzzer, LOW); myServo.write(0); isLidOpen = false;
+        digitalWrite(buzzer, LOW); 
+        myServo.write(0); 
+        isLidOpen = false;
+        ignoreInsideSensorUntil = currentMillis + 2000; 
+        
         printLog(">> RE-CHECKING BIN LEVEL... <<");
         delay(2000); 
         long checkDist = getDist(trig2, echo2);
-        if (checkDist > 12 && checkDist != 999) { 
+        
+        if (checkDist >= 8 && checkDist != 999) { 
           printLog(">> BIN CLEARED! <<");
           ignoreSensorUntil = currentMillis + 3000; 
           currentState = STANDBY;
-          Blynk.virtualWrite(V2, 0); // อัปเดตสวิตช์ในแอพให้กลับมาที่ Standby
+          Blynk.virtualWrite(V2, 0); 
         }
       }
       break;
     }
   }
 
-  // --- 3. Serial Log (ส่งค่าทุกๆ 1 วินาที) ---
   if (currentMillis - lastPrintTime > 1000) {
     String sName = (currentState == STANDBY) ? "STANDBY" : (currentState == CONTROL) ? "CONTROL" : (currentState == SERVICE) ? "SERVICE" : "FULL_BIN";
-    String output = "[" + sName + "] F:" + String(distFront) + "cm | B:" + String(distInside) + "cm";
+    String sSensor = autoSensorEnabled ? "ON" : "OFF";
+    String output = "[" + sName + "] Sensor:" + sSensor + " F:" + String(distFront) + "cm | B:" + String(distInside) + "cm";
     Serial.println(output); 
     lastPrintTime = currentMillis;
   }
